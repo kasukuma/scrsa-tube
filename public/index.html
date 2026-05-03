@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    <title>onigiri</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="onigiri-app" data-mode="home">
+
+        <header class="oni-header">
+            <div class="oni-header__left">
+                <button class="oni-header-logo" id="logo-btn" aria-label="トップに戻る">
+                    <div class="onigiri-ico onigiri-ico--sm"></div>
+                    <span class="oni-header-logo-text">onigiri</span>
+                </button>
+            </div>
+
+            <div class="oni-header__center">
+                <div class="oni-search">
+                    <div class="oni-search__field">
+                        <input
+                            type="text"
+                            id="v_url"
+                            class="oni-search__input"
+                            placeholder="YouTube URL または検索ワード"
+                            spellcheck="false"
+                            autocomplete="off"
+                        >
+                    </div>
+                    <button id="v_exec" class="oni-search__btn" aria-label="検索">
+                        <svg viewBox="0 0 24 24" class="oni-search__icon" aria-hidden="true">
+                            <path d="M20.87 20.17l-5.59-5.59C16.35 13.35 17 11.75 17 10c0-3.87-3.13-7-7-7s-7 3.13-7 7 3.13 7 7 7c1.75 0 3.35-.65 4.58-1.71l5.59 5.59.7-.71zM10 16c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="oni-header__right">
+                <button class="oni-hamburger" id="menu-btn" aria-label="メニューを開く" aria-expanded="false">
+                    <span></span><span></span><span></span>
+                </button>
+            </div>
+        </header>
+
+        <main id="onigiri-main">
+            <div id="onigiri-res"></div>
+        </main>
+
+    </div>
+
+    <div id="oni-drawer" class="oni-drawer" inert role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+        <div class="oni-drawer__overlay" id="drawer-overlay"></div>
+        <aside class="oni-drawer__panel">
+            <div class="oni-drawer__head">
+                <h2 id="drawer-title" class="oni-drawer__title">設定</h2>
+                <button class="oni-drawer__close" id="drawer-close" aria-label="閉じる">&times;</button>
+            </div>
+            <div class="oni-drawer__body">
+
+                <div class="oni-field">
+                    <label class="oni-field__label" for="opt-player-mode">再生方式</label>
+                    <select id="opt-player-mode" class="oni-select">
+                        <option value="direct">直接再生</option>
+                        <option value="embed">公式埋め込み</option>
+                    </select>
+                    <p class="oni-field__desc">多少の待ち時間や失敗する可能性があります。</p>
+                </div>
+
+                <div class="oni-field">
+                    <label class="oni-field__label" for="opt-modal-mode">動画クリック時の挙動</label>
+                    <select id="opt-modal-mode" class="oni-select">
+                        <option value="page">埋め込みビュー</option>
+                        <option value="modal">モーダルで開く</option>
+                    </select>
+                    <p class="oni-field__desc">動画をクリックしたときの開き方</p>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <div id="oni-modal" class="oni-modal" inert
+         role="dialog" aria-modal="true" aria-labelledby="modal-title-text">
+        <div class="oni-modal-overlay" id="modal-overlay"></div>
+        <div class="oni-modal-card">
+            <button class="oni-modal-close" id="modal-close" aria-label="閉じる">&times;</button>
+            <img id="modal-thumb" src="" alt="" class="oni-modal-thumb">
+            <p id="modal-title-text" class="oni-modal-title"></p>
+            <div id="modal-action" class="oni-modal-action"></div>
+        </div>
+    </div>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>
