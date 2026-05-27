@@ -5,10 +5,10 @@ import { getLink, getLinkCandidates, setAliveInstances } from './downloader.js';
 
 const app = express();
 
-// #1: リバースプロキシ背後での正しいIPアドレス取得（レートリミットの正常動作に必須）
+// IP取得
 app.set('trust proxy', true);
 
-// #7: セキュリティヘッダー設定
+// 設定
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
@@ -53,6 +53,11 @@ const INSTANCES = [
     'https://invidious.private.coffee/',
     'https://invidious.projectsegfau.lt/',
     'https://invidious.reallyaweso.me/',
+    'https://invidious.tiekoetter.com/',
+    'https://inv.thepixora.com/',
+    'https://yt.chocolatemoo53.com/',
+    'https://inv-ygg.nadeko.net/',
+    'https://inv.nadeko.ygg/',
     'https://iv.datura.network/',
     'https://iv.duti.dev/',
     'https://iv.melmac.space/',
@@ -324,7 +329,7 @@ app.get('/api/search', rateLimit(30, 60_000), async (req, res) => {
     if (alive.length === 0) return res.status(503).json({ error: '現在検索できるサーバーがありません' });
 
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    // #11: 1件余分に取得して hasMore を正確に判定する
+    // 判定
     const SEARCH_PAGE_SIZE = 20;
 
     try {
@@ -618,7 +623,7 @@ ping().then(() => {
     scheduleNext();
     const server = app.listen(PORT);
 
-    // #2: グレースフルシャットダウン — 処理中リクエストを完了させてから終了
+    // ダウン
     const shutdown = () => {
         server.close(() => process.exit(0));
     };
