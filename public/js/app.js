@@ -15,7 +15,7 @@ const resEl   = document.getElementById('onigiri-res');
 initSettings();
 
 let suppressPush = false;
-let playlistController = null; // #3: goPlaylist キャンセル用
+let playlistController = null; // キャンセル
 
 function pushHistory(state) {
     if (suppressPush) return;
@@ -50,7 +50,7 @@ function abortAllExceptModal() {
     abortSearch();
     abortChannel();
     abortWatch();
-    // #3: 進行中の goPlaylist フェッチのキャンセル
+    // これもキャンセル
     if (playlistController) { playlistController.abort(); playlistController = null; }
 }
 
@@ -96,6 +96,7 @@ function goChannel(channelId, { push = true } = {}) {
     if (!channelId) return;
     if (isModalOpen()) closeModal({ silent: true });
     abortAllExceptModal();
+    resetChannelState();
     runChannel(channelId);
     if (push) pushHistory({ mode: 'channel', channelId });
 }
@@ -103,9 +104,9 @@ function goChannel(channelId, { push = true } = {}) {
 async function goPlaylist(playlistId, hint = {}) {
     if (!playlistId) return;
     if (isModalOpen()) closeModal({ silent: true });
-    abortAllExceptModal(); // playlistController も一緒にキャンセル
+    abortAllExceptModal(); // またキャンセル
 
-    playlistController = new AbortController(); // #3: 新たなコントローラーを生成
+    playlistController = new AbortController(); // 生成
     const signal = playlistController.signal;
 
     appEl.dataset.mode = 'watch';
@@ -116,7 +117,7 @@ async function goPlaylist(playlistId, hint = {}) {
         const r = await fetch(`/api/playlist?id=${encodeURIComponent(playlistId)}`, { signal });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const data = await r.json();
-        if (signal.aborted) return; // #3: fetch完了前にナビゲーションされていたら中断
+        if (signal.aborted) return; // 中断
         const videos = Array.isArray(data.videos) ? data.videos : [];
         if (videos.length === 0) {
             resEl.innerHTML = '<p class="status-label">再生リストの動画を取得できませんでした。</p>';
@@ -131,7 +132,7 @@ async function goPlaylist(playlistId, hint = {}) {
         };
         goWatch(first.id, { title: first.title, thumbnail: first.thumbnail }, { playlist: ctx });
     } catch (e) {
-        if (e.name === 'AbortError') return; // #3: キャンセル時は何もしない
+        if (e.name === 'AbortError') return; // 何もしない
         resEl.innerHTML = '<p class="status-label">再生リストを取得できませんでした。</p>';
     } finally {
         playlistController = null;
