@@ -55,7 +55,6 @@ export async function runSearch(query, isNew = true) {
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        // #11: サーバーが {videos, hasMore} 形式で返すようになったため対応
         const videos = Array.isArray(data.videos) ? data.videos : [];
         const serverHasMore = typeof data.hasMore === 'boolean' ? data.hasMore : videos.length >= PAGE_SIZE;
 
