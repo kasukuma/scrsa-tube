@@ -1,14 +1,13 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import helmet from 'helmet';
+import { Innertube, UniversalCache, Log as YTLog } from 'youtubei.js';
 import { getLink, getLinkCandidates, setAliveInstances } from './downloader.js';
 
 const app = express();
 
-// IP取得
 app.set('trust proxy', true);
 
-// 設定
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
@@ -79,6 +78,7 @@ const resolveCache = new Map();
 const RESOLVE_TTL = 3 * 60 * 1000;
 
 const genericCache = new Map();
+const GENERIC_CACHE_MAX = 300;
 
 function gcGet(key) {
     const e = genericCache.get(key);
@@ -88,12 +88,13 @@ function gcGet(key) {
 }
 function gcSet(key, value, ttlMs) {
     genericCache.set(key, { value, expire: Date.now() + ttlMs });
-    if (genericCache.size > 300) {
+    if (genericCache.size > GENERIC_CACHE_MAX) {
         const now = Date.now();
         for (const [k, v] of genericCache) if (v.expire < now) genericCache.delete(k);
-        if (genericCache.size > 300) {
+        while (genericCache.size > GENERIC_CACHE_MAX) {
             const oldest = genericCache.keys().next().value;
-            if (oldest) genericCache.delete(oldest);
+            if (!oldest) break;
+            genericCache.delete(oldest);
         }
     }
 }
@@ -239,6 +240,195 @@ function normalizeVideo(v) {
     };
 }
 
+try {
+    if (YTLog && YTLog.Level) {
+        YTLog.log_level_ = [YTLog.Level.NONE];
+    }
+} catch {}
+
+let innertubePromise = null;
+async function getInnertube() {
+    if (!innertubePromise) {
+        innertubePromise = Innertube.create({
+            lang: 'ja',
+            location: 'JP',
+            retrieve_player: false,
+            cache: new UniversalCache(false),
+        }).catch((err) => {
+            innertubePromise = null;
+            throw err;
+        });
+    }
+    return innertubePromise;
+}
+
+function parseDurationText(text) {
+    if (!text || typeof text !== 'string') return 0;
+    const parts = text.split(':').map(s => parseInt(s, 10));
+    if (parts.some(n => Number.isNaN(n))) return 0;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 1) return parts[0];
+    return 0;
+}
+
+function parseViewCount(text) {
+    if (!text || typeof text !== 'string') return 0;
+    const m = text.replace(/,/g, '').match(/([\d.]+)\s*([KMB万億千]?)/);
+    if (!m) return 0;
+    const n = parseFloat(m[1]);
+    if (!Number.isFinite(n)) return 0;
+    const unit = m[2] || '';
+    switch (unit) {
+        case 'K': return Math.round(n * 1_000);
+        case 'M': return Math.round(n * 1_000_000);
+        case 'B': return Math.round(n * 1_000_000_000);
+        case '千': return Math.round(n * 1_000);
+        case '万': return Math.round(n * 10_000);
+        case '億': return Math.round(n * 100_000_000);
+        default:  return Math.round(n);
+    }
+}
+
+function readText(node) {
+    if (!node) return '';
+    if (typeof node === 'string') return node;
+    if (typeof node.text === 'string') return node.text;
+    if (typeof node.toString === 'function') {
+        try { const s = node.toString(); if (s && s !== '[object Object]') return s; } catch {}
+    }
+    return '';
+}
+
+function extractLockupVideo(lv) {
+    if (!lv) return null;
+    if (lv.content_type !== 'VIDEO') return null;
+
+    const id = lv.content_id;
+    if (!id || typeof id !== 'string' || !/^[a-zA-Z0-9_-]{11}$/.test(id)) return null;
+
+    const meta = lv.metadata || {};
+    const title = readText(meta.title);
+
+    let viewText = '';
+    let publishedText = '';
+    const rows = meta.metadata?.metadata_rows || [];
+    for (const row of rows) {
+        const parts = row?.metadata_parts || [];
+        for (const p of parts) {
+            const t = readText(p?.text);
+            if (!t) continue;
+            if (/視聴|views|view/i.test(t)) viewText = t;
+            else if (!publishedText) publishedText = t;
+        }
+    }
+    const viewCount = parseViewCount(viewText);
+
+    let lengthSeconds = 0;
+    const overlays = lv.content_image?.primary_thumbnail?.overlays || [];
+    for (const o of overlays) {
+        const txt = readText(o?.text) || readText(o);
+        const s = parseDurationText(txt);
+        if (s > 0) { lengthSeconds = s; break; }
+    }
+
+    return {
+        id,
+        title,
+        thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+        channelId: '',
+        channelName: '',
+        viewCount,
+        published: 0,
+        publishedText,
+        lengthSeconds,
+        liveNow: false,
+        isUpcoming: false,
+    };
+}
+
+function collectLockupVideos(feed) {
+    const lockups = feed?.memo?.get?.('LockupView') || [];
+    const out = [];
+    const seen = new Set();
+    for (const lv of lockups) {
+        const v = extractLockupVideo(lv);
+        if (!v) continue;
+        if (seen.has(v.id)) continue;
+        seen.add(v.id);
+        out.push(v);
+    }
+    return out;
+}
+
+async function fetchChannelVideosViaInnertube(channelId, continuationToken) {
+    const yt = await getInnertube();
+
+    if (continuationToken) {
+        try {
+            const decoded = JSON.parse(Buffer.from(continuationToken, 'base64').toString('utf-8'));
+            if (!decoded || decoded.cid !== channelId || !decoded.k) {
+                throw new Error('invalid_token');
+            }
+            const state = innertubeState.get(decoded.k);
+            if (!state || state.cid !== channelId) {
+                return { videos: [], continuation: null };
+            }
+            const next = await state.feed.getContinuation();
+            const items = collectLockupVideos(next);
+            if (next.has_continuation) {
+                state.feed = next;
+                state.expire = Date.now() + 10 * 60 * 1000;
+                innertubeState.set(decoded.k, state);
+                return {
+                    videos: items,
+                    continuation: encodeContinuation(channelId, decoded.k),
+                };
+            }
+            innertubeState.delete(decoded.k);
+            return { videos: items, continuation: null };
+        } catch {
+            return { videos: [], continuation: null };
+        }
+    }
+
+    const channel = await yt.getChannel(channelId);
+    let feed;
+    try {
+        feed = await channel.getVideos();
+    } catch {
+        feed = channel;
+    }
+
+    const items = collectLockupVideos(feed);
+
+    let continuation = null;
+    if (feed.has_continuation) {
+        const key = `${channelId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+        innertubeState.set(key, { cid: channelId, feed, expire: Date.now() + 10 * 60 * 1000 });
+        gcInnertubeState();
+        continuation = encodeContinuation(channelId, key);
+    }
+    return { videos: items, continuation };
+}
+
+const innertubeState = new Map();
+function gcInnertubeState() {
+    const now = Date.now();
+    for (const [k, v] of innertubeState) {
+        if (v.expire < now) innertubeState.delete(k);
+    }
+    while (innertubeState.size > 200) {
+        const oldest = innertubeState.keys().next().value;
+        if (!oldest) break;
+        innertubeState.delete(oldest);
+    }
+}
+
+function encodeContinuation(channelId, key) {
+    return Buffer.from(JSON.stringify({ cid: channelId, k: key, t: Date.now() }), 'utf-8').toString('base64');
+}
+
 app.get('/health', (_req, res) => res.send('ok'));
 
 async function detectLive(id) {
@@ -329,7 +519,6 @@ app.get('/api/search', rateLimit(30, 60_000), async (req, res) => {
     if (alive.length === 0) return res.status(503).json({ error: '現在検索できるサーバーがありません' });
 
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    // 判定
     const SEARCH_PAGE_SIZE = 20;
 
     try {
@@ -374,140 +563,21 @@ app.get('/api/channel/info', rateLimit(30, 60_000), async (req, res) => {
 });
 
 app.get('/api/channel/videos', rateLimit(50, 60_000), async (req, res) => {
-    const { id, type = 'videos', sort = 'newest', continuation } = req.query;
+    const { id, continuation } = req.query;
     if (!id) return res.status(400).json({ error: 'チャンネルIDが必要です' });
-    if (alive.length === 0) return res.status(503).json({ error: '現在検索できるサーバーがありません' });
 
-    const ep = type === 'shorts' ? 'shorts' : type === 'live' ? 'streams' : 'videos';
-
-    const cacheKey = continuation ? null : `chvids:${id}:${ep}:${sort}`;
+    const cacheKey = continuation ? null : `chvids:${id}`;
     if (cacheKey) {
         const c = gcGet(cacheKey);
         if (c) return res.json(c);
     }
 
     try {
-        const data = await raceJson(
-            `api/v1/channels/${encodeURIComponent(id)}/${ep}?${(() => {
-                const p = new URLSearchParams({ sort_by: sort });
-                if (continuation) p.set('continuation', continuation);
-                return p.toString();
-            })()}`,
-            (j) => Array.isArray(j.videos)
-        );
-
-        const rawVideos = data.videos || [];
-        const nextContinuation = data.continuation ?? data.continuationData ?? null;
-
-        const payload = {
-            videos: rawVideos.map(v => ({
-                id: v.videoId,
-                title: v.title || '',
-                thumbnail: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
-                viewCount: v.viewCount || 0,
-                published: typeof v.published === 'number' && Number.isFinite(v.published) ? v.published : 0,
-                publishedText: v.publishedText || '',
-                lengthSeconds: v.lengthSeconds || 0,
-                liveNow: !!v.liveNow,
-                isUpcoming: !!v.isUpcoming,
-            })),
-            continuation: typeof nextContinuation === 'string' ? nextContinuation : null,
-        };
+        const payload = await fetchChannelVideosViaInnertube(id, continuation || null);
         if (cacheKey) gcSet(cacheKey, payload, 5 * 60 * 1000);
         return res.json(payload);
     } catch {
         return res.status(503).json({ error: '動画一覧を取得できませんでした。' });
-    }
-});
-
-app.get('/api/channel/playlists', rateLimit(30, 60_000), async (req, res) => {
-    const { id, continuation } = req.query;
-    if (!id) return res.status(400).json({ error: 'チャンネルIDが必要です' });
-    if (alive.length === 0) return res.status(503).json({ error: '現在検索できるサーバーがありません' });
-
-    const cacheKey = continuation ? null : `chpl:${id}`;
-    if (cacheKey) {
-        const c = gcGet(cacheKey);
-        if (c) return res.json(c);
-    }
-
-    try {
-        const params = new URLSearchParams();
-        if (continuation) params.set('continuation', continuation);
-        const data = await raceJson(
-            `api/v1/channels/${encodeURIComponent(id)}/playlists${params.toString() ? '?' + params.toString() : ''}`,
-            (j) => Array.isArray(j.playlists)
-        );
-        const next = data.continuation ?? null;
-        const payload = {
-            playlists: (data.playlists || []).map(p => {
-                const firstId = p.videos?.[0]?.videoId || '';
-                const fromInv = pickBestThumb(p.playlistThumbnails);
-                const thumb = firstId
-                    ? `https://i.ytimg.com/vi/${firstId}/hqdefault.jpg`
-                    : (fromInv || '');
-                return {
-                    id: p.playlistId,
-                    title: p.title || '',
-                    thumbnail: thumb,
-                    videoCount: p.videoCount || 0,
-                    firstVideoId: firstId,
-                };
-            }),
-            continuation: typeof next === 'string' ? next : null,
-        };
-        if (cacheKey) gcSet(cacheKey, payload, 10 * 60 * 1000);
-        return res.json(payload);
-    } catch {
-        return res.status(503).json({ error: '再生リストを取得できませんでした。' });
-    }
-});
-
-app.get('/api/playlist', rateLimit(30, 60_000), async (req, res) => {
-    const { id, continuation } = req.query;
-    if (!id) return res.status(400).json({ error: '再生リストIDが必要です' });
-    if (alive.length === 0) return res.status(503).json({ error: '現在情報を取得できるサーバーがありません' });
-
-    const cacheKey = continuation ? null : `pl:${id}`;
-    if (cacheKey) {
-        const c = gcGet(cacheKey);
-        if (c) return res.json(c);
-    }
-
-    try {
-        const params = new URLSearchParams();
-        if (continuation) params.set('continuation', continuation);
-        const data = await raceJson(
-            `api/v1/playlists/${encodeURIComponent(id)}${params.toString() ? '?' + params.toString() : ''}`,
-            (j) => !!(j && Array.isArray(j.videos))
-        );
-
-        const videos = (data.videos || [])
-            .filter(v => v && v.videoId)
-            .map(v => ({
-                id: v.videoId,
-                title: v.title || '',
-                thumbnail: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
-                channelId: v.authorId || '',
-                channelName: v.author || '',
-                lengthSeconds: v.lengthSeconds || 0,
-                index: v.index || 0,
-            }));
-
-        const payload = {
-            id: data.playlistId || id,
-            title: data.title || '',
-            author: data.author || '',
-            authorId: data.authorId || '',
-            videoCount: data.videoCount || videos.length,
-            thumbnail: videos[0] ? videos[0].thumbnail : '',
-            videos,
-            continuation: typeof data.continuation === 'string' ? data.continuation : null,
-        };
-        if (cacheKey) gcSet(cacheKey, payload, 10 * 60 * 1000);
-        return res.json(payload);
-    } catch {
-        return res.status(503).json({ error: '再生リストを取得できませんでした。' });
     }
 });
 
@@ -618,12 +688,13 @@ app.get('/api/home', rateLimit(60, 60_000), async (req, res) => {
     }
 });
 
+setInterval(gcInnertubeState, 5 * 60 * 1000);
+
 const PORT = process.env.PORT || 3000;
 ping().then(() => {
     scheduleNext();
     const server = app.listen(PORT);
 
-    // ダウン
     const shutdown = () => {
         server.close(() => process.exit(0));
     };
