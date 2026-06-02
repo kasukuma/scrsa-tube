@@ -94,9 +94,3 @@ export function extractVideoId(val) {
     }
     return null;
 }
-
-export function extractPlaylistId(val) {
-    if (!val) return null;
-    const m = val.match(/[?&]list=([a-zA-Z0-9_-]+)/);
-    return m ? m[1] : null;
-}
