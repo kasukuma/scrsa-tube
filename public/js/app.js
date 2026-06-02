@@ -1,21 +1,19 @@
 import { extractVideoId } from './utils.js';
-import { initSettings, isModalMode }  from './settings.js';
-import { runHome, abortHome, setHomeHandlers }            from './home.js';
+import { initSettings, isModalMode } from './settings.js';
+import { runHome, abortHome, setHomeHandlers } from './home.js';
 import { runSearch, abortSearch, setSearchHandlers, getCurrentQuery } from './search.js';
 import { runChannel, abortChannel, resetChannelState, setChannelHandlers } from './channel.js';
-import { runWatch, abortWatch, setWatchHandlers }         from './watch.js';
+import { runWatch, abortWatch, setWatchHandlers } from './watch.js';
 import { openModal, closeModal, isModalOpen, setModalCloseCallback } from './modal.js';
 
 const appEl   = document.getElementById('onigiri-app');
 const inputEl = document.getElementById('v_url');
 const btnEl   = document.getElementById('v_exec');
 const logoBtn = document.getElementById('logo-btn');
-const resEl   = document.getElementById('onigiri-res');
 
 initSettings();
 
 let suppressPush = false;
-let playlistController = null; // キャンセル
 
 function pushHistory(state) {
     if (suppressPush) return;
@@ -50,8 +48,6 @@ function abortAllExceptModal() {
     abortSearch();
     abortChannel();
     abortWatch();
-    // これもキャンセル
-    if (playlistController) { playlistController.abort(); playlistController = null; }
 }
 
 function goHome({ push = true } = {}) {
@@ -81,14 +77,14 @@ function goSearch(query, { push = true } = {}) {
     if (push) pushHistory({ mode: 'search', query });
 }
 
-function goWatch(videoId, hint = {}, opts = {}, { push = true } = {}) {
+function goWatch(videoId, hint = {}, { push = true } = {}) {
     if (!videoId) return;
     if (isModalOpen()) closeModal({ silent: true });
     abortHome();
     abortSearch();
     abortChannel();
     abortWatch();
-    runWatch(videoId, hint, opts);
+    runWatch(videoId, hint);
     if (push) pushHistory({ mode: 'watch', videoId, videoHint: hint });
 }
 
@@ -99,44 +95,6 @@ function goChannel(channelId, { push = true } = {}) {
     resetChannelState();
     runChannel(channelId);
     if (push) pushHistory({ mode: 'channel', channelId });
-}
-
-async function goPlaylist(playlistId, hint = {}) {
-    if (!playlistId) return;
-    if (isModalOpen()) closeModal({ silent: true });
-    abortAllExceptModal(); // またキャンセル
-
-    playlistController = new AbortController(); // 生成
-    const signal = playlistController.signal;
-
-    appEl.dataset.mode = 'watch';
-    resEl.innerHTML = '<div class="status-label" style="padding:60px 0;">再生リストを読み込み中…</div>';
-    document.title = (hint.title || '再生リスト') + ' - onigiri';
-
-    try {
-        const r = await fetch(`/api/playlist?id=${encodeURIComponent(playlistId)}`, { signal });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const data = await r.json();
-        if (signal.aborted) return; // 中断
-        const videos = Array.isArray(data.videos) ? data.videos : [];
-        if (videos.length === 0) {
-            resEl.innerHTML = '<p class="status-label">再生リストの動画を取得できませんでした。</p>';
-            return;
-        }
-        const first = videos[0];
-        const ctx = {
-            id: data.id || playlistId,
-            title: data.title || hint.title || '',
-            videos,
-            currentIndex: 0,
-        };
-        goWatch(first.id, { title: first.title, thumbnail: first.thumbnail }, { playlist: ctx });
-    } catch (e) {
-        if (e.name === 'AbortError') return; // 何もしない
-        resEl.innerHTML = '<p class="status-label">再生リストを取得できませんでした。</p>';
-    } finally {
-        playlistController = null;
-    }
 }
 
 function handleVideoClick(videoId, hint = {}) {
@@ -152,13 +110,10 @@ setModalCloseCallback(() => {});
 
 setHomeHandlers({ onCardClick: handleVideoClick, runChannel: (id) => goChannel(id) });
 setSearchHandlers({ onCardClick: handleVideoClick, runChannel: (id) => goChannel(id) });
-setChannelHandlers({
-    onCardClick: handleVideoClick,
-    onPlaylistClick: (pid, hint) => goPlaylist(pid, hint),
-});
+setChannelHandlers({ onCardClick: handleVideoClick });
 setWatchHandlers({
-    runChannel:   (id) => goChannel(id),
-    navigateWatch: (id, hint, opts) => goWatch(id, hint, opts || {}),
+    runChannel:    (id) => goChannel(id),
+    navigateWatch: (id, hint) => goWatch(id, hint),
 });
 
 window.addEventListener('popstate', (e) => {
@@ -177,7 +132,7 @@ window.addEventListener('popstate', (e) => {
                 break;
             case 'watch':
                 if (state.videoId) {
-                    goWatch(state.videoId, state.videoHint || {}, {}, { push: false });
+                    goWatch(state.videoId, state.videoHint || {}, { push: false });
                 } else {
                     goHome({ push: false });
                 }
