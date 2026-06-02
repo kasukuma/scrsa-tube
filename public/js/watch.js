@@ -28,8 +28,6 @@ let directUrlIdx = 0;
 let directRetryCount = 0;
 const MAX_DIRECT_RETRIES = 2;
 
-let playlistContext = null;
-
 export function setWatchHandlers({ runChannel, navigateWatch }) {
     _runChannel    = runChannel;
     _navigateWatch = navigateWatch;
@@ -47,7 +45,7 @@ onPlayerModeChange(() => {
     }
 });
 
-export async function runWatch(id, hint = {}, opts = {}) {
+export async function runWatch(id, hint = {}) {
     if (!/^[a-zA-Z0-9_-]{11}$/.test(id)) return;
 
     abortWatch();
@@ -65,8 +63,7 @@ export async function runWatch(id, hint = {}, opts = {}) {
     lastResolved = null;
     directUrlIdx = 0;
     directRetryCount = 0;
-    playlistContext = opts.playlist || null;
-    recScrollEnabled = false; // #6: 動画遷移のたびにリセット
+    recScrollEnabled = false;
 
     appEl.dataset.mode = 'watch';
     window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' });
@@ -190,7 +187,6 @@ function renderDirectPlayer(streamUrl) {
     if (!v) return;
 
     v.addEventListener('error', () => onDirectError(), { once: true });
-    v.addEventListener('ended', () => onVideoEnded(), { once: true });
 }
 
 function onDirectError() {
@@ -212,12 +208,12 @@ function onDirectError() {
 }
 
 async function refetchAndRetry() {
-    const targetId = currentVideoId; // #4: 呼び出し時点の動画IDを保持
+    const targetId = currentVideoId;
     const player = document.getElementById('watch-player');
     if (player) player.innerHTML = `<div class="watch-player__placeholder">${loadingHTML}</div>`;
     try {
         const r = await fetch(`/api/resolve?id=${encodeURIComponent(targetId)}&_=${Date.now()}`);
-        if (currentVideoId !== targetId) return; // #4: ナビゲーション済みなら中断
+        if (currentVideoId !== targetId) return;
         if (r.ok) {
             const data = await r.json();
             if (data && data.type === 'download' && (data.url || (data.urls && data.urls.length))) {
@@ -231,29 +227,10 @@ async function refetchAndRetry() {
             }
         }
     } catch {}
-    if (currentVideoId !== targetId) return; // #4: fetch待機中にナビゲーションされた場合も中断
+    if (currentVideoId !== targetId) return;
     currentEffectivePlayer = 'embed';
     renderEmbedPlayer(currentVideoId);
     renderSwitcher();
-}
-
-function onVideoEnded() {
-    if (playlistContext) {
-        const next = getNextPlaylistVideo();
-        if (next) {
-            _navigateWatch?.(next.id, { title: next.title, thumbnail: next.thumbnail }, {
-                playlist: { ...playlistContext, currentIndex: playlistContext.currentIndex + 1 },
-            });
-        }
-    }
-}
-
-function getNextPlaylistVideo() {
-    if (!playlistContext) return null;
-    const list = playlistContext.videos || [];
-    const idx = playlistContext.currentIndex;
-    if (idx + 1 < list.length) return list[idx + 1];
-    return null;
 }
 
 function applyEffectivePlayer({ resolved, force } = {}) {
@@ -375,70 +352,7 @@ function renderActionRow(id, resolved) {
 function renderSidebar() {
     const side = document.getElementById('watch-side');
     if (!side) return;
-
-    if (playlistContext) {
-        renderPlaylistSidebar(side);
-        return;
-    }
     renderRecommendedInitial(side);
-}
-
-function renderPlaylistSidebar(side) {
-    side.innerHTML = '';
-
-    const header = document.createElement('div');
-    header.className = 'pl-sidebar__header';
-    const total = playlistContext.videos?.length || 0;
-    const idx = playlistContext.currentIndex + 1;
-    header.innerHTML = `
-        <div class="pl-sidebar__title">${escapeHtml(playlistContext.title || '再生リスト')}</div>
-        <div class="pl-sidebar__meta">${idx} / ${total}</div>`;
-    side.appendChild(header);
-
-    const list = document.createElement('div');
-    list.className = 'pl-sidebar__list rec-list';
-    side.appendChild(list);
-
-    (playlistContext.videos || []).forEach((v, i) => {
-        list.appendChild(createPlaylistRow(v, i));
-    });
-
-    const active = list.querySelector('.pl-sidebar__row--active');
-    if (active) {
-        try { active.scrollIntoView({ block: 'nearest' }); } catch {}
-    }
-}
-
-function createPlaylistRow(v, i) {
-    const isActive = i === playlistContext.currentIndex;
-    const row = document.createElement('div');
-    row.className = 'rec-card pl-sidebar__row' + (isActive ? ' pl-sidebar__row--active' : '');
-    const idxBadge = `<span class="pl-sidebar__index">${i + 1}</span>`;
-    const lenText = formatDuration(v.lengthSeconds);
-    const lenBadge = lenText ? `<span class="length-badge">${escapeHtml(lenText)}</span>` : '';
-    row.innerHTML = `
-        ${idxBadge}
-        <div class="rec-card__thumb-wrap">
-            <img class="rec-card__thumb" src="${escapeHtml(v.thumbnail)}" loading="lazy" alt="">
-            ${lenBadge}
-        </div>
-        <div class="rec-card__info">
-            <h3 class="rec-card__title">${escapeHtml(v.title)}</h3>
-            ${v.channelName ? `<p class="rec-card__channel">${escapeHtml(v.channelName)}</p>` : ''}
-        </div>`;
-
-    const img = row.querySelector('img.rec-card__thumb');
-    img.addEventListener('error', () => {
-        img.src = `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg`;
-    }, { once: true });
-
-    row.addEventListener('click', () => {
-        if (i === playlistContext.currentIndex) return;
-        _navigateWatch?.(v.id, { title: v.title, thumbnail: v.thumbnail }, {
-            playlist: { ...playlistContext, currentIndex: i },
-        });
-    });
-    return row;
 }
 
 function renderRecommendedInitial(side) {
@@ -486,7 +400,6 @@ async function triggerLoadMore() {
 
 async function loadMoreRecommended() {
     if (recLoading || !recHasMore) return;
-    if (playlistContext) return;
     recLoading = true;
     const list = document.querySelector('#watch-side .rec-list');
 
@@ -520,7 +433,6 @@ async function loadMoreRecommended() {
             return;
         }
         const data = await r.json();
-        // #11: サーバーが {videos, hasMore} 形式で返すため対応
         const arr = Array.isArray(data.videos) ? data.videos : (Array.isArray(data) ? data : []);
         const newOnes = arr
             .filter(v => v && v.id && v.id !== currentVideoId && !recExtraSeen.has(v.id));
@@ -592,7 +504,6 @@ new IntersectionObserver((entries) => {
     if (appEl.dataset.mode !== 'watch') return;
     if (!recScrollEnabled) return;
     if (recLoading || !recHasMore) return;
-    if (playlistContext) return;
     loadMoreRecommended();
 }, { rootMargin: '600px' }).observe(recSentinel);
 
