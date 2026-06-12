@@ -6,6 +6,26 @@ export function setAliveInstances(instances) {
     aliveInstances = instances;
 }
 
+const FALLBACK_INSTANCES = [
+    'https://cal1.iv.ggtyler.dev/',
+    'https://eu-proxy.poketube.fun/',
+    'https://invid-api.poketube.fun/',
+    'https://invidious.nerdvpn.de/',
+    'https://invidious.private.coffee/',
+    'https://invidious.f5.si/',
+    'https://yewtu.be/',
+    'https://invidious.jing.rocks/',
+    'https://iv.duti.dev/',
+    'https://nyc1.iv.ggtyler.dev/',
+    'https://pol1.iv.ggtyler.dev/',
+    'https://usa-proxy2.poketube.fun/',
+];
+
+function getPool(max) {
+    const base = aliveInstances.length > 0 ? aliveInstances : FALLBACK_INSTANCES;
+    return base.slice(0, max);
+}
+
 async function fetchWithTimeout(url, ms, signal) {
     const ac = new AbortController();
     const t = setTimeout(() => ac.abort(), ms);
@@ -15,7 +35,7 @@ async function fetchWithTimeout(url, ms, signal) {
         return await fetch(url, {
             signal: ac.signal,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
                 'Accept': 'application/json',
             },
         });
@@ -61,29 +81,29 @@ function pickStreamCandidates(data) {
     for (const f of formats) {
         if (f.url) push(f.url);
     }
+    if (data.hlsUrl) push(data.hlsUrl);
     return out;
 }
 
 export async function getLink(id, signal) {
-    if (aliveInstances.length === 0) return null;
+    const targets = getPool(10);
+    if (targets.length === 0) return null;
 
     const controller = new AbortController();
     const onAbort = () => controller.abort();
     signal?.addEventListener('abort', onAbort, { once: true });
 
-    const targets = aliveInstances.slice(0, 8);
-
     const promises = targets.map(async (inst) => {
         const res = await fetchWithTimeout(
-            `${inst}api/v1/videos/${id}?fields=formatStreams`,
-            8000,
+            `${inst}api/v1/videos/${id}?fields=formatStreams,hlsUrl`,
+            9000,
             controller.signal
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const ct = res.headers.get('content-type') || '';
         if (!ct.includes('application/json')) throw new Error('Not JSON');
         const data = await res.json();
-        const url = pickStream(data);
+        const url = pickStream(data) || data.hlsUrl;
         if (!url) throw new Error('No stream URL');
         controller.abort();
         return url;
@@ -99,17 +119,17 @@ export async function getLink(id, signal) {
 }
 
 export async function getLinkCandidates(id, max = 4, signal) {
-    if (aliveInstances.length === 0) return [];
+    const targets = getPool(12);
+    if (targets.length === 0) return [];
 
-    const targets = aliveInstances.slice(0, 10);
     const collected = [];
     const seen = new Set();
 
     const tasks = targets.map(async (inst) => {
         try {
             const res = await fetchWithTimeout(
-                `${inst}api/v1/videos/${id}?fields=formatStreams`,
-                8000,
+                `${inst}api/v1/videos/${id}?fields=formatStreams,hlsUrl`,
+                9000,
                 signal
             );
             if (!res.ok) return;
