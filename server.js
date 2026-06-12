@@ -13,14 +13,17 @@ app.use(helmet({
         directives: {
             defaultSrc: ["'self'"],
             scriptSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            styleSrcElem: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
             frameSrc: ["https://www.youtube-nocookie.com"],
             imgSrc: ["'self'", "https://i.ytimg.com", "https:", "data:"],
-            mediaSrc: ["https:"],
-            connectSrc: ["'self'"],
+            mediaSrc: ["https:", "blob:"],
+            connectSrc: ["'self'", "https:"],
         },
     },
     crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 
 app.use(express.static('public'));
@@ -153,16 +156,27 @@ function nowJST() {
 }
 
 async function pingOnce() {
+    const probeHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'application/json',
+    };
     const results = await Promise.allSettled(INSTANCES.map(async (url) => {
         const ac = new AbortController();
-        const t = setTimeout(() => ac.abort(), 5000);
+        const t = setTimeout(() => ac.abort(), 8000);
         const start = Date.now();
         try {
-            const r = await fetch(`${url}api/v1/search?q=test`, { signal: ac.signal });
-            const ct = r.headers.get('content-type') || '';
-            if (!ct.includes('application/json')) return null;
-            const json = await r.json();
-            if (!Array.isArray(json)) return null;
+            let r = await fetch(`${url}api/v1/stats`, { signal: ac.signal, headers: probeHeaders });
+            let ct = r.headers.get('content-type') || '';
+            if (!r.ok || !ct.includes('application/json')) {
+                r = await fetch(`${url}api/v1/search?q=test&type=video`, { signal: ac.signal, headers: probeHeaders });
+                ct = r.headers.get('content-type') || '';
+                if (!r.ok || !ct.includes('application/json')) return null;
+                const json = await r.json();
+                if (!Array.isArray(json)) return null;
+            } else {
+                const json = await r.json();
+                if (!json || typeof json !== 'object' || !json.software) return null;
+            }
             return { url, ms: Date.now() - start };
         } catch {
             return null;
@@ -178,9 +192,13 @@ async function pingOnce() {
 }
 
 async function ping() {
-    for (let i = 0; i <= 2; i++) {
+    for (let i = 0; i <= 3; i++) {
         alive = await pingOnce();
         if (alive.length >= 3) break;
+        if (i < 3) await new Promise(r => setTimeout(r, 1500));
+    }
+    if (alive.length === 0) {
+        alive = INSTANCES.slice();
     }
     setAliveInstances(alive);
 }
@@ -197,20 +215,30 @@ function scheduleNext() {
 }
 
 async function raceJson(path, validator) {
-    if (alive.length === 0) throw new Error('no_alive');
+    const pool = (alive.length > 0 ? alive : INSTANCES).slice(0, 20);
+    if (pool.length === 0) throw new Error('no_alive');
     const shared = new AbortController();
-    return await Promise.any(alive.map(async (inst) => {
-        const r = await fetch(`${inst}${path}`, {
-            signal: shared.signal,
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
-        });
-        const ct = r.headers.get('content-type') || '';
-        if (!ct.includes('application/json')) throw new Error('Not JSON');
-        const json = await r.json();
-        if (!validator(json)) throw new Error('Invalid');
-        shared.abort();
-        return json;
-    }));
+    const timeout = setTimeout(() => shared.abort(), 12000);
+    try {
+        return await Promise.any(pool.map(async (inst) => {
+            const r = await fetch(`${inst}${path}`, {
+                signal: shared.signal,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+                    'Accept': 'application/json',
+                },
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const ct = r.headers.get('content-type') || '';
+            if (!ct.includes('application/json')) throw new Error('Not JSON');
+            const json = await r.json();
+            if (!validator(json)) throw new Error('Invalid');
+            shared.abort();
+            return json;
+        }));
+    } finally {
+        clearTimeout(timeout);
+    }
 }
 
 async function tryRaceJson(path, validator) {
@@ -516,7 +544,6 @@ app.get('/api/resolve', rateLimit(40, 60_000), async (req, res) => {
 app.get('/api/search', rateLimit(30, 60_000), async (req, res) => {
     const q = req.query.q?.trim();
     if (!q) return res.status(400).json({ error: '検索ワードを入力してください' });
-    if (alive.length === 0) return res.status(503).json({ error: '現在検索できるサーバーがありません' });
 
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const SEARCH_PAGE_SIZE = 20;
@@ -537,7 +564,6 @@ app.get('/api/search', rateLimit(30, 60_000), async (req, res) => {
 app.get('/api/channel/info', rateLimit(30, 60_000), async (req, res) => {
     const { id } = req.query;
     if (!id) return res.status(400).json({ error: 'チャンネルIDが必要です' });
-    if (alive.length === 0) return res.status(503).json({ error: '現在検索できるサーバーがありません' });
 
     const cacheKey = `chinfo:${id}`;
     const c = gcGet(cacheKey);
@@ -586,7 +612,6 @@ app.get('/api/video-info', rateLimit(60, 60_000), async (req, res) => {
     if (!id || !/^[a-zA-Z0-9_-]{11}$/.test(id)) {
         return res.status(400).json({ error: '無効な動画IDです' });
     }
-    if (alive.length === 0) return res.status(503).json({ error: '現在情報を取得できるサーバーがありません' });
 
     const cacheKey = `vinfo:${id}`;
     const c = gcGet(cacheKey);
@@ -669,8 +694,6 @@ async function fetchHomeFeed(region) {
 }
 
 app.get('/api/home', rateLimit(60, 60_000), async (req, res) => {
-    if (alive.length === 0) return res.status(503).json({ error: '現在情報を取得できるサーバーがありません' });
-
     const region = (req.query.region || 'JP').toString().slice(0, 4);
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(60, Math.max(6, parseInt(req.query.pageSize, 10) || 24));
@@ -691,13 +714,14 @@ app.get('/api/home', rateLimit(60, 60_000), async (req, res) => {
 setInterval(gcInnertubeState, 5 * 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
+const server = app.listen(PORT);
 ping().then(() => {
     scheduleNext();
-    const server = app.listen(PORT);
 
-    const shutdown = () => {
-        server.close(() => process.exit(0));
-    };
-    process.on('SIGTERM', shutdown);
-    process.on('SIGINT',  shutdown);
 });
+
+const shutdown = () => {
+    server.close(() => process.exit(0));
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT',  shutdown);
